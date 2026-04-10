@@ -1,86 +1,87 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
-from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import time
 import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 
-# 1. Initialize App
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"], 
- )
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database Setup
+def get_db():
+    conn = sqlite3.connect("jiahong.db")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    conn = sqlite3.connect("jiahong.db")
-    cursor = conn.cursor()
-    # Users Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            phone TEXT PRIMARY KEY,
-            username TEXT,
-            password TEXT,
-            referrer TEXT,
-            balance REAL DEFAULT 0.0,
-            commissions REAL DEFAULT 0.0
-        )
-    """)
-    # Transactions Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT,
-            title TEXT,
-            amount REAL,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
+    with get_db() as conn:
+        # Users: Stores balances and referral info
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                phone TEXT PRIMARY KEY,
+                username TEXT,
+                password TEXT,
+                referrer TEXT,
+                balance REAL DEFAULT 0.0,
+                commissions REAL DEFAULT 0.0
+            )
+        """)
+        # Transactions: History of all money movement
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                title TEXT,
+                amount REAL,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 init_db()
 
-# 4. Data Models
-class User(BaseModel):
+class UserReg(BaseModel):
     username: str
     phone: str
     password: str
     referrer: Optional[str] = None
-    balance: float = 0.0
-    commissions: float = 0.0
 
 @app.post("/register")
-async def register(user: User):
-    conn = sqlite3.connect("jiahong.db")
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO users (username, phone, password, referrer) VALUES (?, ?, ?, ?)",
-                       (user.username, user.phone, user.password, user.referrer))
-        conn.commit()
-        return {"status": "success"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Phone already registered")
-    finally:
-        conn.close()
+async def register(user: UserReg):
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT INTO users (username, phone, password, referrer) VALUES (?, ?, ?, ?)",
+                         (user.username, user.phone, user.password, user.referrer))
+            conn.commit()
+            return {"status": "success"}
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Phone already registered")
 
 @app.post("/login")
 async def login(phone: str, password: str):
-    conn = sqlite3.connect("jiahong.db")
-    conn.row_factory = sqlite3.Row # Allows accessing columns by name
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE phone = ? AND password = ?", (phone, password))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return dict(user)
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE phone = ? AND password = ?", (phone, password)).fetchone()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return dict(user)
+
+@app.post("/transaction")
+async def create_transaction(phone: str, title: str, amount: float):
+    with get_db() as conn:
+        # Update balance and log history in one go
+        conn.execute("UPDATE users SET balance = balance + ? WHERE phone = ?", (amount, phone))
+        conn.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)", (phone, title, amount))
+        conn.commit()
+        
+        # Get updated user info
+        user = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
+        return dict(user)
 
 @app.post("/transaction")
 async def create_transaction(phone: str, title: str, amount: float):
