@@ -2,26 +2,41 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
+import sqlite3
 import time
 import uvicorn
 
 # 1. Initialize App
 app = FastAPI()
 
-# 2. Correct Middleware Setup (Must be after app initialization)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def init_db():
+    conn = sqlite3.connect("jiahong.db")
+    cursor = conn.cursor()
+    # Users Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            phone TEXT PRIMARY KEY,
+            username TEXT,
+            password TEXT,
+            referrer TEXT,
+            balance REAL DEFAULT 0.0,
+            commissions REAL DEFAULT 0.0
+        )
+    """)
+    # Transactions Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT,
+            title TEXT,
+            amount REAL,
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# 3. Simple In-Memory Database
-db = {
-    "users": {},
-    "transactions": []
-}
+init_db()
 
 # 4. Data Models
 class User(BaseModel):
@@ -32,22 +47,32 @@ class User(BaseModel):
     balance: float = 0.0
     commissions: float = 0.0
 
-# 5. Routes
 @app.post("/register")
 async def register(user: User):
-    if user.phone in db["users"]:
+    conn = sqlite3.connect("jiahong.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO users (username, phone, password, referrer) VALUES (?, ?, ?, ?)",
+                       (user.username, user.phone, user.password, user.referrer))
+        conn.commit()
+        return {"status": "success"}
+    except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Phone already registered")
-    
-    # Save user to memory
-    db["users"][user.phone] = user.dict()
-    return {"status": "success", "message": "Registered"}
+    finally:
+        conn.close()
 
 @app.post("/login")
 async def login(phone: str, password: str):
-    user = db["users"].get(phone)
-    if not user or user["password"] != password:
+    conn = sqlite3.connect("jiahong.db")
+    conn.row_factory = sqlite3.Row # Allows accessing columns by name
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE phone = ? AND password = ?", (phone, password))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return user
+    return dict(user)
 
 @app.post("/transaction")
 async def create_transaction(phone: str, title: str, amount: float):
@@ -72,6 +97,30 @@ async def get_team(phone: str):
     # Filter users who were referred by this phone number
     team = [u for u in all_users if u.get("referrer") == phone]
     return team
+    
+@app.post("/process-commission")
+async def process_commission(buyer_phone: str, amount: float):
+    conn = sqlite3.connect("jiahong.db")
+    cursor = conn.cursor()
+    
+    # 1. Find the referrer
+    cursor.execute("SELECT referrer FROM users WHERE phone = ?", (buyer_phone,))
+    res = cursor.fetchone()
+    if res and res[0]:
+        lvl1_phone = res[0]
+        reward = amount * 0.10 # 10% Commission
+        
+        # 2. Update Referrer Balance
+        cursor.execute("UPDATE users SET balance = balance + ?, commissions = commissions + ? WHERE phone = ?", 
+                       (reward, reward, lvl1_phone))
+        
+        # 3. Log it
+        cursor.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)",
+                       (lvl1_phone, f"Ref Commission from {buyer_phone}", reward))
+        
+    conn.commit()
+    conn.close()
+    return {"status": "commissions processed"}
 
 # 6. Server Runner for Pydroid / Render
 if __name__ == "__main__":
