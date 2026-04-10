@@ -65,8 +65,10 @@ async def register(user: User):
     user_data = user.model_dump() if hasattr(user, 'model_dump') else user.dict()
     
     # Ensure fields exist
-    if "balance" not in user_ user_data["balance"] = 0.0
-    if "commissions" not in user_ user_data["commissions"] = 0.0
+    if "balance" not in user_data["balance"] == 0.0:
+        return
+    if "commissions" not in user_data["commissions"] == 0.0:
+        return
     
     db["users"][user.phone] = user_data
     save_db(db)
