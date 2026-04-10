@@ -9,6 +9,14 @@ import uvicorn
 # 1. Initialize App
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"], 
+ )
+
 def init_db():
     conn = sqlite3.connect("jiahong.db")
     cursor = conn.cursor()
