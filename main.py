@@ -105,6 +105,9 @@ class UserUpdate(BaseModel):
     # Add other fields here if you want them updatable
 
 # --- New Endpoints for auth object ---
+@app.get("/my-investments")
+async def get_plans():
+    return PLANS
 
 @app.get("/users")
 async def get_all_users():
