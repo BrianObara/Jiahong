@@ -7,6 +7,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timedelta
+
+# Investment Plans (Must match frontend IDs)
+PLANS = {
+    1: {'name': 'Alpha Starter', 'price': 100, 'roi': 5, 'duration': 7},
+    2: {'name': 'Pro Yield', 'price': 500, 'roi': 8, 'duration': 14},
+    3: {'name': 'Titan Fund', 'price': 2000, 'roi': 12, 'duration': 30}
+}
 
 RENDER_URL = "https://jiahong.onrender.com/health"
 
@@ -56,6 +64,18 @@ def init_db():
                 referrer TEXT,
                 balance REAL DEFAULT 0.0,
                 commissions REAL DEFAULT 0.0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS investments (
+                uid INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                plan_id INTEGER,
+                plan_name TEXT,
+                price REAL,
+                roi REAL,
+                expiry TIMESTAMP,
+                last_claimed_date TEXT
             )
         """)
         conn.execute("""
@@ -164,6 +184,69 @@ async def get_team(phone: str):
     with get_db() as conn:
         team = conn.execute("SELECT * FROM users WHERE referrer = ?", (phone,)).fetchall()
         return [dict(u) for u in team]
+        
+
+@app.post("/invest/purchase")
+async def purchase_plan(phone: str, plan_id: int):
+    plan = PLANS.get(plan_id)
+    if not plan: raise HTTPException(status_code=400, detail="Invalid Plan")
+
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
+        if user['balance'] < plan['price']:
+            raise HTTPException(status_code=400, detail="Insufficient Balance")
+
+        # 1. Deduct Balance
+        conn.execute("UPDATE users SET balance = balance - ? WHERE phone = ?", (plan['price'], phone))
+        
+        # 2. Add Investment
+        expiry = datetime.now() + timedelta(days=plan['duration'])
+        conn.execute("""INSERT INTO investments (phone, plan_id, plan_name, price, roi, expiry) 
+                     VALUES (?, ?, ?, ?, ?, ?)""", 
+                     (phone, plan_id, plan['name'], plan['price'], plan['roi'], expiry))
+        
+        # 3. Log Transaction
+        conn.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)", 
+                     (phone, f"Invest: {plan['name']}", -plan['price']))
+        
+        # 4. Commission Logic (L1 and L2)
+        if user['referrer']:
+            # L1
+            l1_bonus = plan['price'] * 0.10
+            conn.execute("UPDATE users SET balance = balance + ?, commissions = commissions + ? WHERE phone = ?", 
+                         (l1_bonus, l1_bonus, user['referrer']))
+            
+            # L2
+            l1_user = conn.execute("SELECT referrer FROM users WHERE phone = ?", (user['referrer'],)).fetchone()
+            if l1_user and l1_user['referrer']:
+                l2_bonus = plan['price'] * 0.05
+                conn.execute("UPDATE users SET balance = balance + ?, commissions = commissions + ? WHERE phone = ?", 
+                             (l2_bonus, l2_bonus, l1_user['referrer']))
+        
+        conn.commit()
+        return {"status": "success"}
+
+@app.post("/invest/claim")
+async def claim_task(phone: str, investment_uid: int):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_db() as conn:
+        inv = conn.execute("SELECT * FROM investments WHERE uid = ? AND phone = ?", (investment_uid, phone)).fetchone()
+        
+        if not inv: raise HTTPException(status_code=404, detail="Investment not found")
+        if inv['last_claimed_date'] == today: raise HTTPException(status_code=400, detail="Already claimed today")
+        
+        reward = inv['price'] * (inv['roi'] / 100)
+        
+        # Update Investment & User Balance
+        conn.execute("UPDATE investments SET last_claimed_date = ? WHERE uid = ?", (today, investment_uid))
+        conn.execute("UPDATE users SET balance = balance + ? WHERE phone = ?", (reward, phone))
+        conn.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)", (phone, f"Task Reward: {inv['plan_name']}", reward))
+        
+        conn.commit()
+        return {"reward": reward}        
+        
+        
+        
 
 @app.get("/health")
 async def health_check():
