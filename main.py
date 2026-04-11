@@ -1,11 +1,36 @@
 import sqlite3
 import uvicorn
+import asyncio
+import httpx
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+RENDER_URL = "https://jiahong.onrender.com/health"
+
+async def keep_alive():
+    """Background task that pings the server every 10 minutes."""
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                response = await client.get(RENDER_URL)
+                print(f"Self-ping successful: {response.status_code}")
+            except Exception as e:
+                print(f"Self-ping failed: {e}")
+            
+            # Wait for 10 minutes (600 seconds)
+            await asyncio.sleep(600)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This runs when the server starts
+    asyncio.create_task(keep_alive())
+    yield
+    # This runs when the server shuts down
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -139,6 +164,10 @@ async def get_team(phone: str):
     with get_db() as conn:
         team = conn.execute("SELECT * FROM users WHERE referrer = ?", (phone,)).fetchall()
         return [dict(u) for u in team]
+
+@app.get("/health")
+async def health_check():
+    return {"status": "alive"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
