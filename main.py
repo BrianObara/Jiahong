@@ -1,9 +1,8 @@
 import sqlite3
-import time
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -15,7 +14,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database Setup
+# --- Database Setup ---
+
 def get_db():
     conn = sqlite3.connect("jiahong.db")
     conn.row_factory = sqlite3.Row
@@ -23,7 +23,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Users: Stores balances and referral info
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 phone TEXT PRIMARY KEY,
@@ -34,7 +33,6 @@ def init_db():
                 commissions REAL DEFAULT 0.0
             )
         """)
-        # Transactions: History of all money movement
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,11 +44,62 @@ def init_db():
         """)
 init_db()
 
+# --- Models ---
+
 class UserReg(BaseModel):
     username: str
     phone: str
     password: str
     referrer: Optional[str] = None
+
+class UserUpdate(BaseModel):
+    phone: str
+    username: Optional[str] = None
+    balance: Optional[float] = None
+    commissions: Optional[float] = None
+    # Add other fields here if you want them updatable
+
+# --- New Endpoints for auth object ---
+
+@app.get("/users")
+async def get_all_users():
+    """Returns a list of all registered users."""
+    with get_db() as conn:
+        users = conn.execute("SELECT * FROM users").fetchall()
+        return [dict(u) for u in users]
+
+@app.put("/users/update")
+async def update_user(user_data: UserUpdate):
+    """Updates a user's profile and returns the updated user object."""
+    with get_db() as conn:
+        # Check if user exists first
+        existing = conn.execute("SELECT * FROM users WHERE phone = ?", (user_data.phone,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Build dynamic update query based on provided fields
+        update_fields = []
+        params = []
+        
+        for field, value in user_data.dict(exclude_unset=True).items():
+            if field != "phone": # Don't update the primary key
+                update_fields.append(f"{field} = ?")
+                params.append(value)
+        
+        if not update_fields:
+            return dict(existing)
+
+        params.append(user_data.phone)
+        query = f"UPDATE users SET {', '.join(update_fields)} WHERE phone = ?"
+        
+        conn.execute(query, tuple(params))
+        conn.commit()
+        
+        # Fetch the updated version to return to the frontend
+        updated = conn.execute("SELECT * FROM users WHERE phone = ?", (user_data.phone,)).fetchone()
+        return dict(updated)
+
+# --- Existing Endpoints ---
 
 @app.post("/register")
 async def register(user: UserReg):
@@ -74,65 +123,22 @@ async def login(phone: str, password: str):
 @app.post("/transaction")
 async def create_transaction(phone: str, title: str, amount: float):
     with get_db() as conn:
-        # Update balance and log history in one go
+        user_check = conn.execute("SELECT phone FROM users WHERE phone = ?", (phone,)).fetchone()
+        if not user_check:
+            raise HTTPException(status_code=404, detail="User not found")
+            
         conn.execute("UPDATE users SET balance = balance + ? WHERE phone = ?", (amount, phone))
         conn.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)", (phone, title, amount))
         conn.commit()
         
-        # Get updated user info
         user = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
         return dict(user)
 
-@app.post("/transaction")
-async def create_transaction(phone: str, title: str, amount: float):
-    if phone not in db["users"]:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Update Balance logic
-    db["users"][phone]["balance"] += amount
-    
-    tx = {
-        "phone": phone, 
-        "title": title, 
-        "amount": amount, 
-        "date": time.strftime("%Y-%m-%d")
-    }
-    db["transactions"].append(tx)
-    return tx
-
 @app.get("/team/{phone}")
 async def get_team(phone: str):
-    all_users = db["users"].values()
-    # Filter users who were referred by this phone number
-    team = [u for u in all_users if u.get("referrer") == phone]
-    return team
-    
-@app.post("/process-commission")
-async def process_commission(buyer_phone: str, amount: float):
-    conn = sqlite3.connect("jiahong.db")
-    cursor = conn.cursor()
-    
-    # 1. Find the referrer
-    cursor.execute("SELECT referrer FROM users WHERE phone = ?", (buyer_phone,))
-    res = cursor.fetchone()
-    if res and res[0]:
-        lvl1_phone = res[0]
-        reward = amount * 0.10 # 10% Commission
-        
-        # 2. Update Referrer Balance
-        cursor.execute("UPDATE users SET balance = balance + ?, commissions = commissions + ? WHERE phone = ?", 
-                       (reward, reward, lvl1_phone))
-        
-        # 3. Log it
-        cursor.execute("INSERT INTO transactions (phone, title, amount) VALUES (?, ?, ?)",
-                       (lvl1_phone, f"Ref Commission from {buyer_phone}", reward))
-        
-    conn.commit()
-    conn.close()
-    return {"status": "commissions processed"}
+    with get_db() as conn:
+        team = conn.execute("SELECT * FROM users WHERE referrer = ?", (phone,)).fetchall()
+        return [dict(u) for u in team]
 
-# 6. Server Runner for Pydroid / Render
 if __name__ == "__main__":
-    # Note: Render provides a PORT environment variable, 
-    # but 10000 is their default internal port.
     uvicorn.run(app, host="0.0.0.0", port=10000)
