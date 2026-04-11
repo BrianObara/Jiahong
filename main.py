@@ -106,8 +106,20 @@ class UserUpdate(BaseModel):
 
 # --- New Endpoints for auth object ---
 @app.get("/my-investments")
-async def get_plans():
-    return PLANS
+async def get_my_investments(phone: str):
+    """
+    Retrieves all investment plans associated with a specific phone number.
+    """
+    with get_db() as conn:
+        # We select everything from the investments table for this user
+        # You can also add 'ORDER BY uid DESC' to show the newest ones first
+        investments = conn.execute(
+            "SELECT * FROM investments WHERE phone = ? ORDER BY uid DESC", 
+            (phone,)
+        ).fetchall()
+        
+        # Convert the sqlite3.Row objects into a list of dictionaries for JSON response
+        return [dict(inv) for inv in investments]
 
 @app.get("/users")
 async def get_all_users():
